@@ -1,0 +1,1151 @@
+项目 'eyedance-2api' 的结构树:
+📂 eyedance-2api/
+    📄 .env
+    📄 .env.example
+    📄 Dockerfile
+    📄 README.md
+    📄 docker-compose.yml
+    📄 main.py
+    📄 nginx.conf
+    📄 requirements.txt
+    📂 app/
+        📂 core/
+            📄 __init__.py
+            📄 config.py
+        📂 providers/
+            📄 __init__.py
+            📄 base_provider.py
+            📄 eyedance_provider.py
+        📂 utils/
+            📄 oss_uploader.py
+    📂 static/
+        📄 index.html
+        📄 script.js
+        📄 style.css
+================================================================================
+
+--- 文件路径: .env ---
+
+# [自动填充] eyedance-2api 生产环境配置
+# 该文件由 Genesis Protocol · Ω (Omega) 版自动生成。
+
+# --- 安全配置 ---
+# 用于保护您的 API 服务的访问密钥，请按需修改为您自己的复杂密钥。
+API_MASTER_KEY=1
+
+# --- 端口配置 ---
+# Nginx 对外暴露的端口
+NGINX_PORT=8089
+
+
+--- 文件路径: .env.example ---
+
+# ====================================================================
+# eyedance-2api 配置文件模板
+# ====================================================================
+#
+# 请将此文件重命名为 ".env" 并填入您的配置。
+#
+
+# --- 核心安全配置 (必须设置) ---
+# 用于保护您 API 服务的访问密钥。
+API_MASTER_KEY=sk-eyedance-2api-default-key-please-change-me
+
+# --- 部署配置 (可选) ---
+# Nginx 对外暴露的端口
+NGINX_PORT=8089
+
+
+--- 文件路径: Dockerfile ---
+
+# ====================================================================
+# Dockerfile for eyedance-2api (v2.0 - Concurrent & Parametric)
+# ====================================================================
+
+FROM python:3.10-slim
+
+# 设置环境变量
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+WORKDIR /app
+
+# 安装 Python 依赖
+COPY requirements.txt .
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir -r requirements.txt
+
+# 复制应用代码
+COPY . .
+
+# 创建并切换到非 root 用户
+RUN useradd --create-home appuser && \
+    chown -R appuser:appuser /app
+USER appuser
+
+# 暴露端口并启动 (修正：移除 --workers 参数，使用单进程模式)
+EXPOSE 8000
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+
+
+--- 文件路径: README.md ---
+
+# Qwen Multi-Account Local API (v7.2)
+
+这是一个基于 FastAPI 的高性能通义千问本地代理服务。它不仅将网页版API封装成标准接口，还支持**多账号轮询**、**模型策略路由**和**密钥认证**等高级功能。
+
+## ✨ 核心特性
+
+-   **多账号支持**: 可配置多个国内站账号，并通过策略路由将特定模型（如`Qwen3-Max-Preview`）的请求定向到专属账号。
+-   **高稳定性**: 基于个人长期有效的认证信息，服务稳定可靠。
+-   **全功能覆盖**: 支持文本、视觉、以及国际站的图像和视频生成模型。
+-   **企业级安全**: 内置`API_MASTER_KEY`认证，保护您的API服务不被滥用。
+-   **高性能架构**: 采用 FastAPI + 异步IO，为高并发而生。
+-   **一键部署**: 提供终极简化的 Docker Compose 配置，真正实现一键启动。
+
+## 🚀 快速开始
+
+### 1. 准备认证信息
+
+本项目依赖通义千问网页版的认证信息。请登录 **[通义千问官网](https://tongyi.aliyun.com/chat)**，然后按 `F12` 打开开发者工具，在**网络(Network)**面板随便发送一条消息，从 `completions` 请求的**请求头(Request Headers)**中找到并复制以下两项：
+
+-   `cookie`
+-   `x-xsrf-token`
+
+*（如果您需要使用专属账号或国际站功能，请用同样的方法获取对应账号的认证信息。）*
+
+### 2. 配置项目
+
+在 `qwen-local` 文件夹中，将 `.env.example` 文件重命名为 `.env`，然后打开它，填入您刚刚获取的信息。
+
+LISTEN_PORT=8082
+API_MASTER_KEY=1
+MODEL_TO_ACCOUNT_MAP='{}' # 留空即可
+CN_ACCOUNT_1_COOKIE="你的token"
+CN_ACCOUNT_1_XSRF_TOKEN="你的token"
+CN_ACCOUNT_2_COOKIE="你的token"
+CN_ACCOUNT_2_XSRF_TOKEN="你的token"
+title: Qwen
+emoji: 💻
+colorFrom: green
+colorTo: indigo
+sdk: docker
+pinned: false
+license: other
+short_description: Qwen  free API
+app_port: 8000
+
+--- 文件路径: docker-compose.yml ---
+
+services:
+  nginx:
+    image: nginx:latest
+    container_name: eyedance-2api-nginx
+    restart: always
+    ports:
+      - "${NGINX_PORT:-8089}:80"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - app
+    networks:
+      - eyedance-net
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: eyedance-2api-app
+    restart: unless-stopped
+    env_file:
+      - .env
+    networks:
+      - eyedance-net
+
+networks:
+  eyedance-net:
+    driver: bridge
+
+
+--- 文件路径: main.py ---
+
+import logging
+import time
+import uuid
+from contextlib import asynccontextmanager
+from typing import Optional, Dict, Any
+
+from fastapi import FastAPI, Request, HTTPException, Depends, Header
+from fastapi.responses import JSONResponse, HTMLResponse
+from fastapi.staticfiles import StaticFiles
+
+from app.core.config import settings
+from app.providers.eyedance_provider import EyeDanceProvider
+
+# --- 日志配置 ---
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
+
+# --- 全局 Provider 实例 ---
+provider = EyeDanceProvider()
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    logger.info(f"应用启动中... {settings.APP_NAME} v{settings.APP_VERSION}")
+    logger.info("服务已进入 'Cloudscraper' 模式，将自动处理潜在的 Cloudflare 挑战。")
+    logger.info(f"API 服务将在 http://localhost:{settings.NGINX_PORT} 上可用")
+    logger.info(f"Web UI 测试界面已启用，请访问 http://localhost:{settings.NGINX_PORT}/")
+    yield
+    logger.info("应用关闭。")
+
+app = FastAPI(
+    title=settings.APP_NAME,
+    version=settings.APP_VERSION,
+    description=settings.DESCRIPTION,
+    lifespan=lifespan
+)
+
+# --- 挂载静态文件目录 ---
+app.mount("/static", StaticFiles(directory="static"), name="static")
+
+# --- 安全依赖 ---
+async def verify_api_key(authorization: Optional[str] = Header(None)):
+    if settings.API_MASTER_KEY and settings.API_MASTER_KEY != "1":
+        if not authorization or "bearer" not in authorization.lower():
+            raise HTTPException(status_code=401, detail="需要 Bearer Token 认证。")
+        token = authorization.split(" ")[-1]
+        if token != settings.API_MASTER_KEY:
+            raise HTTPException(status_code=403, detail="无效的 API Key。")
+
+# --- API 路由 ---
+@app.post("/v1/images/generations", dependencies=[Depends(verify_api_key)])
+async def image_generations(request: Request):
+    try:
+        request_data = await request.json()
+        image_result_dict = await provider.generate_image(request_data)
+        return JSONResponse(content=image_result_dict)
+    except Exception as e:
+        logger.error(f"处理图像生成请求时发生顶层错误: {e}", exc_info=True)
+        if isinstance(e, HTTPException):
+            raise e
+        raise HTTPException(status_code=500, detail=f"内部服务器错误: {str(e)}")
+
+@app.post("/v1/chat/completions", dependencies=[Depends(verify_api_key)])
+async def chat_completions(request: Request):
+    try:
+        request_data = await request.json()
+        
+        messages = request_data.get("messages", [])
+        if not messages:
+            raise HTTPException(status_code=400, detail="请求体中缺少 'messages' 字段。")
+        
+        last_user_message = next((m['content'] for m in reversed(messages) if m.get('role') == 'user'), None)
+        if not last_user_message:
+            raise HTTPException(status_code=400, detail="在 'messages' 中未找到用户消息。")
+
+        # 从聊天请求中获取模型名称，如果未提供则使用默认值
+        model_name = request_data.get("model", settings.DEFAULT_MODEL)
+
+        image_request_data = {
+            "prompt": last_user_message,
+            "model": model_name,  # 将模型名称传递给图像生成器
+            "n": 1,
+            "size": "600x450",
+            "steps": 20,
+            "response_format": "b64_json"
+        }
+        
+        logger.info(f"通过聊天接口适配图像生成，使用模型 '{model_name}' 和 prompt: '{last_user_message[:50]}...'")
+        image_result_dict = await provider.generate_image(image_request_data)
+
+        if not image_result_dict.get("data") or not image_result_dict["data"][0].get("b64_json"):
+            raise HTTPException(status_code=502, detail="从上游服务生成图像失败。")
+            
+        b64_json = image_result_dict["data"][0]["b64_json"]
+        
+        response_content = f"![](data:image/png;base64,{b64_json})"
+        
+        chat_response = {
+            "id": f"chatcmpl-{uuid.uuid4()}",
+            "object": "chat.completion",
+            "created": int(time.time()),
+            "model": model_name,  # 在响应中也使用请求的模型名称
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": response_content,
+                },
+                "finish_reason": "stop",
+            }],
+            "usage": {
+                "prompt_tokens": 0,
+                "completion_tokens": 0,
+                "total_tokens": 0,
+            }
+        }
+        
+        return JSONResponse(content=chat_response)
+
+    except Exception as e:
+        logger.error(f"处理聊天生成请求时发生顶层错误: {e}", exc_info=True)
+        if isinstance(e, HTTPException):
+            raise e
+        raise HTTPException(status_code=500, detail=f"内部服务器错误: {str(e)}")
+
+
+@app.get("/v1/models", dependencies=[Depends(verify_api_key)])
+async def list_models():
+    """返回可用模型列表"""
+    model_data = await provider.get_models()
+    return model_data
+
+# --- Web UI 路由 ---
+@app.get("/", response_class=HTMLResponse, include_in_schema=False)
+async def serve_ui():
+    try:
+        with open("static/index.html", "r", encoding="utf-8") as f:
+            return HTMLResponse(content=f.read())
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="UI 文件 (static/index.html) 未找到。")
+
+
+--- 文件路径: nginx.conf ---
+
+worker_processes auto;
+
+events {
+    worker_connections 1024;
+}
+
+http {
+    upstream eyedance_backend {
+        # ip_hash 保证来自同一客户端的请求被转发到同一个 worker
+        # 在单 worker 模式下，此项作用不大，但保留以备将来扩展
+        ip_hash;
+        server app:8000;
+    }
+
+    server {
+        listen 80;
+        server_name localhost;
+
+        # 允许更大的请求体，以防 prompt 过长
+        client_max_body_size 10M;
+
+        location / {
+            proxy_pass http://eyedance_backend;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+            
+            # 流式传输优化 (虽然此API非流式，但保留是良好实践)
+            proxy_buffering off;
+            proxy_cache off;
+            proxy_set_header Connection '';
+            proxy_http_version 1.1;
+            chunked_transfer_encoding off;
+        }
+    }
+}
+
+
+--- 文件路径: requirements.txt ---
+
+fastapi
+uvicorn[standard]
+pydantic-settings
+python-dotenv
+cloudscraper
+aiohttp
+asyncio
+
+
+--- 文件路径: app\core\__init__.py ---
+
+
+
+--- 文件路径: app\core\config.py ---
+
+from pydantic_settings import BaseSettings, SettingsConfigDict
+from typing import Optional, List
+
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding='utf-8',
+        extra="ignore"
+    )
+
+    APP_NAME: str = "eyedance-2api"
+    APP_VERSION: str = "2.0.0"
+    DESCRIPTION: str = "一个将 eyedance.net 转换为兼容 OpenAI 格式 API 的高性能并发代理。"
+
+    API_MASTER_KEY: Optional[str] = None
+    NGINX_PORT: int = 8089
+
+    # 上游请求配置
+    API_REQUEST_TIMEOUT: int = 180
+    UPSTREAM_MAX_RETRIES: int = 3
+    UPSTREAM_RETRY_DELAY: int = 2 # 秒
+
+    # 模型配置
+    DEFAULT_MODEL: str = "eyedance-qwen-image"
+    # 新增 "Flux-Krea" 模型
+    KNOWN_MODELS: List[str] = ["eyedance-qwen-image", "Flux-Krea"]
+    UPSTREAM_MODEL_NAME: str = "Qwen-Image"
+
+settings = Settings()
+
+
+--- 文件路径: app\providers\__init__.py ---
+
+
+
+--- 文件路径: app\providers\base_provider.py ---
+
+from abc import ABC, abstractmethod
+from typing import Dict, Any
+from fastapi.responses import JSONResponse
+
+class BaseProvider(ABC):
+    @abstractmethod
+    async def generate_image(self, request_data: Dict[str, Any]) -> JSONResponse:
+        pass
+
+    @abstractmethod
+    async def get_models(self) -> JSONResponse:
+        pass
+
+
+--- 文件路径: app\providers\eyedance_provider.py ---
+
+import time
+import logging
+import random
+import asyncio
+from typing import Dict, Any, Optional, Tuple
+
+import cloudscraper
+from fastapi import HTTPException
+
+from app.core.config import settings
+from app.providers.base_provider import BaseProvider
+
+logger = logging.getLogger(__name__)
+
+class EyeDanceProvider(BaseProvider):
+    BASE_URL = "https://eyedance.net/api/generate"
+
+    def __init__(self):
+        self.scraper = cloudscraper.create_scraper()
+
+    def _prepare_headers(self, model_name: str) -> Dict[str, str]:
+        """根据模型名称动态生成请求头"""
+        referer = "https://eyedance.net/"
+        cookie = None
+
+        # 为 Flux-Krea 模型设置特定的 Referer 和 Cookie
+        if model_name == "Flux-Krea":
+            referer = "https://eyedance.net/es/flux-krea"
+            cookie = "NEXT_LOCALE=es; active_theme=default"
+
+        headers = {
+            "Accept": "application/json, text/plain, */*",
+            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+            "Content-Type": "application/json",
+            "Origin": "https://eyedance.net",
+            "Referer": referer,
+            "sec-ch-ua": '"Google Chrome";v="141", "Not?A_Brand";v="8", "Chromium";v="141"',
+            "sec-ch-ua-mobile": "?0",
+            "sec-ch-ua-platform": '"Windows"',
+        }
+        if cookie:
+            headers["Cookie"] = cookie
+        return headers
+
+    def _parse_size(self, size: Optional[str]) -> Tuple[int, int]:
+        if not size or 'x' not in size:
+            return 600, 450
+        try:
+            width, height = map(int, size.split('x'))
+            return width, height
+        except (ValueError, TypeError):
+            logger.warning(f"无效的 size 参数: '{size}', 使用默认值 600x450")
+            return 600, 450
+
+    async def _send_single_request(self, payload: Dict[str, Any]) -> str:
+        loop = asyncio.get_running_loop()
+        # 从 payload 中获取模型名称以生成正确的请求头
+        model_name = payload.get("model", settings.DEFAULT_MODEL)
+        headers = self._prepare_headers(model_name)
+        
+        for attempt in range(settings.UPSTREAM_MAX_RETRIES):
+            try:
+                response = await loop.run_in_executor(
+                    None, 
+                    lambda: self.scraper.post(
+                        self.BASE_URL,
+                        headers=headers,
+                        json=payload,
+                        timeout=settings.API_REQUEST_TIMEOUT
+                    )
+                )
+                
+                if response.status_code >= 500:
+                    logger.warning(f"上游返回 {response.status_code} 错误，正在重试... (尝试 {attempt + 1}/{settings.UPSTREAM_MAX_RETRIES})")
+                    raise ConnectionError(f"Upstream {response.status_code} Error")
+
+                response.raise_for_status()
+                response_json = response.json()
+
+                if "error" in response_json and response_json["error"] == "fetch failed":
+                    logger.warning(f"上游返回 'fetch failed'，正在重试... (尝试 {attempt + 1}/{settings.UPSTREAM_MAX_RETRIES})")
+                    raise ConnectionError("Upstream fetch failed")
+
+                image_url = response_json.get("imageUrl")
+                if not image_url or not image_url.startswith("data:image/png;base64,"):
+                    raise ValueError("上游 API 未返回有效的 Base64 图像数据。")
+
+                return image_url.split(',', 1)[1]
+
+            except Exception as e:
+                logger.error(f"请求上游失败 (尝试 {attempt + 1}): {e}")
+                if attempt < settings.UPSTREAM_MAX_RETRIES - 1:
+                    await asyncio.sleep(settings.UPSTREAM_RETRY_DELAY)
+                else:
+                    raise e
+        
+        raise ConnectionError("所有重试均失败。")
+
+    async def generate_image(self, request_data: Dict[str, Any]) -> Dict[str, Any]:
+        prompt = request_data.get("prompt")
+        if not prompt:
+            raise HTTPException(status_code=400, detail="参数 'prompt' 不能为空。")
+
+        # 从请求中获取模型，如果未提供则使用默认模型
+        model_name = request_data.get("model", settings.DEFAULT_MODEL)
+        if model_name not in settings.KNOWN_MODELS:
+            raise HTTPException(status_code=400, detail=f"不支持的模型: '{model_name}'. 可用模型: {settings.KNOWN_MODELS}")
+
+        # 如果是 Flux-Krea 模型，记录一个警告（因为该模型主要用于英文）
+        if model_name == "Flux-Krea":
+            try:
+                prompt.encode('ascii')
+            except UnicodeEncodeError:
+                logger.warning("模型 'Flux-Krea' 强烈建议使用英文提示词，检测到非英文字符，生成效果可能不佳。")
+
+        width, height = self._parse_size(request_data.get("size"))
+        num_images = request_data.get("n", 1)
+        steps = request_data.get("steps", 20)
+
+        tasks = []
+        for _ in range(num_images):
+            payload = {
+                "prompt": prompt,
+                "width": width,
+                "height": height,
+                "steps": steps,
+                "batch_size": 1,
+                "model": model_name,  # 使用从请求中获取的动态模型
+                "seed": random.randint(0, 1_000_000)
+            }
+            tasks.append(self._send_single_request(payload))
+        
+        logger.info(f"准备向上游并发发送 {num_images} 个 '{model_name}' 模型请求...")
+
+        try:
+            results = await asyncio.gather(*tasks)
+            
+            response_data = {
+                "created": int(time.time()),
+                "data": [{"b64_json": b64_json} for b64_json in results]
+            }
+            return response_data
+
+        except Exception as e:
+            logger.error(f"处理并发请求时发生严重错误: {e}", exc_info=True)
+            raise HTTPException(status_code=502, detail=f"上游服务错误或所有重试均失败: {str(e)}")
+
+    async def get_models(self) -> Dict[str, Any]:
+        model_data = {
+            "object": "list",
+            "data": [
+                {"id": name, "object": "model", "created": int(time.time()), "owned_by": "lzA6"}
+                for name in settings.KNOWN_MODELS
+            ]
+        }
+        return model_data
+
+
+--- 文件路径: app\utils\oss_uploader.py ---
+
+import oss2
+import uuid
+import logging
+import asyncio
+from typing import Dict
+from urllib.parse import urlparse
+
+logger = logging.getLogger(__name__)
+
+class OSSImageUploader:
+    def __init__(self, scraper_session, headers: Dict[str, str]):
+        self.scraper = scraper_session
+        self.headers = headers
+        self.sts_token_url = "https://visualgpt.io/api/v1/oss/sts-token"
+        self.oss_endpoint = "https://oss-us-west-1.aliyuncs.com"
+        self.bucket_name = "nc-cdn"
+        self.upload_path_prefix = "visualgpt/user-upload/"
+        self.cdn_base_url = "https://cdn.visualgpt.io/"
+
+    async def _get_sts_token(self) -> Dict:
+        """
+        异步获取临时的阿里云 OSS STS 令牌。
+        """
+        logger.info("正在获取阿里云 OSS STS 令牌...")
+        loop = asyncio.get_running_loop()
+        try:
+            # 在 executor 中运行同步的 scraper 请求
+            response = await loop.run_in_executor(
+                None, lambda: self.scraper.get(self.sts_token_url, headers=self.headers)
+            )
+            response.raise_for_status()
+            data = response.json()
+            if data.get("code") == 100000 and "data" in data:
+                logger.info("成功获取 STS 令牌。")
+                return data["data"]
+            else:
+                raise Exception(f"获取 STS 令牌失败: {data.get('message', '未知错误')}")
+        except Exception as e:
+            logger.error(f"请求 STS 令牌时发生网络错误: {e}", exc_info=True)
+            raise
+
+    async def upload_image(self, image_bytes: bytes, filename: str) -> str:
+        """
+        使用 STS 令牌将图片上传到阿里云 OSS，并返回最终的 CDN URL。
+        """
+        sts_data = await self._get_sts_token()
+        
+        access_key_id = sts_data.get("AccessKeyId")
+        access_key_secret = sts_data.get("AccessKeySecret")
+        security_token = sts_data.get("SecurityToken")
+
+        # 这一行是之前被截断并导致错误的地方，现在已补全。
+        if not all([access_key_id, access_key_secret, security_token]):
+            raise Exception("获取的 STS 令牌无效，缺少关键凭证字段。")
+
+        # 使用 STS 凭证进行认证
+        auth = oss2.StsAuth(access_key_id, access_key_secret, security_token)
+        bucket = oss2.Bucket(auth, self.oss_endpoint, self.bucket_name)
+
+        # 生成一个唯一的文件名以避免冲突
+        file_extension = filename.split('.')[-1] if '.' in filename else 'png'
+        object_key = f"{self.upload_path_prefix}{uuid.uuid4()}.{file_extension}"
+
+        logger.info(f"正在将图片上传到 OSS: {object_key}")
+
+        # 异步上传
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(
+            None, lambda: bucket.put_object(object_key, image_bytes)
+        )
+        
+        # 构建最终可通过 CDN 访问的 URL
+        final_url = f"{self.cdn_base_url}{object_key}"
+        logger.info(f"OSS 上传成功，CDN URL: {final_url}")
+        
+        return final_url
+
+
+--- 文件路径: static\index.html ---
+
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>EyeDance-2API 测试面板 v2.1</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <div class="container">
+        <div class="sidebar">
+            <div class="header">
+                <h2>EyeDance-2API</h2>
+                <p>v2.1 - 动态模型版</p>
+            </div>
+
+            <div class="form-group">
+                <label for="api-key">API Key</label>
+                <input type="password" id="api-key" placeholder="请输入您的 API Key" value="1">
+            </div>
+
+            <div class="form-group">
+                <label for="model-select">模型 (Model)</label>
+                <select id="model-select"></select>
+                <small id="model-warning" class="hidden model-warning">提示: 'Flux-Krea' 模型仅建议使用英文提示词。</small>
+            </div>
+
+            <div class="form-group">
+                <label for="prompt-input">提示词 (Prompt)</label>
+                <textarea id="prompt-input" rows="6" placeholder="输入您的图像描述..."></textarea>
+            </div>
+
+            <div class="form-group slider-group">
+                <div class="slider-label">
+                    <label for="width-slider">宽度 (Width)</label>
+                    <span id="width-value">600px</span>
+                </div>
+                <input type="range" id="width-slider" min="256" max="1920" step="8" value="600">
+                <small>较大的尺寸会显著增加生成时间。</small>
+            </div>
+
+            <div class="form-group slider-group">
+                <div class="slider-label">
+                    <label for="height-slider">高度 (Height)</label>
+                    <span id="height-value">450px</span>
+                </div>
+                <input type="range" id="height-slider" min="256" max="1920" step="8" value="450">
+            </div>
+
+            <div class="form-group slider-group">
+                <div class="slider-label">
+                    <label for="steps-slider">步数 (Steps)</label>
+                    <span id="steps-value">20</span>
+                </div>
+                <input type="range" id="steps-slider" min="10" max="60" step="1" value="20">
+                <small>步数越多，图像细节可能越丰富，但耗时更长。</small>
+            </div>
+
+            <div class="form-group slider-group">
+                <div class="slider-label">
+                    <label for="count-slider">生成数量 (Count)</label>
+                    <span id="count-value">3</span>
+                </div>
+                <input type="range" id="count-slider" min="1" max="12" step="1" value="3">
+                <small>一次生成多张图片会并发请求，请耐心等待。</small>
+            </div>
+
+            <button id="generate-btn">
+                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="bi bi-magic" viewBox="0 0 16 16"><path d="M9.5 2.672a.5.5 0 1 0 1 0V.843a.5.5 0 0 0-1 0v1.829Zm4.5.035A.5.5 0 0 0 13.293 2L12 3.293a.5.5 0 1 0 .707.707L14 2.707a.5.5 0 0 0 0-.707ZM7.293 4L8 3.293a.5.5 0 1 0-.707-.707L6.586 3.293a.5.5 0 1 0 .707.707ZM5 6.293a.5.5 0 1 0-.707-.707L3.586 6.293a.5.5 0 1 0 .707.707L5 6.293Zm6.707.707a.5.5 0 1 0-.707-.707L10.293 7a.5.5 0 1 0 .707.707l.707-.707ZM1.5 10.328a.5.5 0 0 0 1 0V8.5a.5.5 0 0 0-1 0v1.828Zm4.5-.035a.5.5 0 1 0-1 0V12a.5.5 0 0 0 1 0V10.293ZM10 15a1 1 0 1 1 0-2 1 1 0 0 1 0 2Z"/></svg>
+                <span>生成图像</span>
+            </button>
+        </div>
+        <div class="main-content">
+            <div id="result-panel">
+                <div id="placeholder" class="placeholder">
+                    <p>请在左侧配置参数并开始生成</p>
+                </div>
+                <div id="spinner" class="spinner hidden"></div>
+                <div id="error-message" class="error hidden"></div>
+                <div id="image-grid"></div>
+            </div>
+        </div>
+    </div>
+    <script src="/static/script.js"></script>
+</body>
+</html>
+
+--- 文件路径: static\script.js ---
+
+document.addEventListener('DOMContentLoaded', () => {
+    // DOM Elements
+    const apiKeyInput = document.getElementById('api-key');
+    const modelSelect = document.getElementById('model-select');
+    const modelWarning = document.getElementById('model-warning');
+    const promptInput = document.getElementById('prompt-input');
+    const generateBtn = document.getElementById('generate-btn');
+    
+    const widthSlider = document.getElementById('width-slider');
+    const widthValue = document.getElementById('width-value');
+    const heightSlider = document.getElementById('height-slider');
+    const heightValue = document.getElementById('height-value');
+    const stepsSlider = document.getElementById('steps-slider');
+    const stepsValue = document.getElementById('steps-value');
+    const countSlider = document.getElementById('count-slider');
+    const countValue = document.getElementById('count-value');
+
+    const imageGrid = document.getElementById('image-grid');
+    const spinner = document.getElementById('spinner');
+    const errorMessage = document.getElementById('error-message');
+    const placeholder = document.getElementById('placeholder');
+
+    // --- Functions ---
+
+    /**
+     * Fetches models from the API and populates the dropdown.
+     * Manages the disabled state of controls based on success or failure.
+     */
+    async function populateModels() {
+        // 1. Reset and disable controls at the start
+        modelSelect.innerHTML = '';
+        modelSelect.disabled = true;
+        generateBtn.disabled = true;
+        hideError();
+
+        const apiKey = apiKeyInput.value.trim();
+        if (!apiKey) {
+            const placeholderOption = document.createElement('option');
+            placeholderOption.textContent = "请输入API Key以加载模型";
+            modelSelect.appendChild(placeholderOption);
+            return;
+        }
+
+        // 2. Show loading state in the dropdown
+        const loadingOption = document.createElement('option');
+        loadingOption.textContent = "正在加载模型...";
+        modelSelect.appendChild(loadingOption);
+
+        try {
+            const response = await fetch('/v1/models', {
+                headers: { 'Authorization': `Bearer ${apiKey}` }
+            });
+            const result = await response.json();
+            if (!response.ok) {
+                throw new Error(result.detail || '获取模型列表失败。');
+            }
+            
+            // 3. On success, populate dropdown and enable controls
+            modelSelect.innerHTML = ''; // Clear loading message
+            result.data.forEach(model => {
+                const option = document.createElement('option');
+                option.value = model.id;
+                option.textContent = model.id;
+                modelSelect.appendChild(option);
+            });
+            
+            modelSelect.disabled = false;
+            generateBtn.disabled = false;
+            handleModelChange(); // Show warning for the initially selected model if needed
+
+        } catch (error) {
+            // 4. On failure, show clear error messages
+            showError(`模型加载失败: ${error.message}. 请检查您的 API Key.`);
+            modelSelect.innerHTML = '';
+            const errorOption = document.createElement('option');
+            errorOption.textContent = "加载失败，请检查API Key";
+            modelSelect.appendChild(errorOption);
+        }
+    }
+
+    /**
+     * Shows or hides the warning for the Flux-Krea model.
+     */
+    function handleModelChange() {
+        const selectedModel = modelSelect.value;
+        modelWarning.classList.toggle('hidden', selectedModel !== 'Flux-Krea');
+    }
+
+    /**
+     * Handles the image generation request on button click.
+     */
+    async function handleGenerate() {
+        const apiKey = apiKeyInput.value.trim();
+        const prompt = promptInput.value.trim();
+        const selectedModel = modelSelect.value;
+
+        if (!apiKey || !prompt) {
+            showError("请确保 API Key 和提示词都已填写。");
+            return;
+        }
+        if (!selectedModel || modelSelect.disabled) {
+            showError("模型未成功加载或未选择，请检查您的 API Key。");
+            return;
+        }
+
+        setLoading(true);
+
+        const payload = {
+            model: selectedModel,
+            prompt: prompt,
+            n: parseInt(countSlider.value, 10),
+            size: `${widthSlider.value}x${heightSlider.value}`,
+            steps: parseInt(stepsSlider.value, 10),
+            response_format: "b64_json"
+        };
+
+        try {
+            const response = await fetch('/v1/images/generations', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${apiKey}`
+                },
+                body: JSON.stringify(payload)
+            });
+
+            const result = await response.json();
+            if (!response.ok) {
+                throw new Error(result.detail || '生成失败，未知错误。');
+            }
+
+            if (result.data && result.data.length > 0) {
+                displayImages(result.data);
+            } else {
+                throw new Error('API 返回了成功状态，但没有图片数据。');
+            }
+        } catch (error) {
+            showError(error.message);
+        } finally {
+            setLoading(false);
+        }
+    }
+
+    function displayImages(data) {
+        imageGrid.innerHTML = '';
+        data.forEach(item => {
+            if (item.b64_json) {
+                const imgContainer = document.createElement('div');
+                imgContainer.className = 'image-container';
+                const img = document.createElement('img');
+                img.src = `data:image/png;base64,${item.b64_json}`;
+                img.alt = 'Generated Image';
+                imgContainer.appendChild(img);
+                imageGrid.appendChild(imgContainer);
+            }
+        });
+    }
+
+    function setLoading(isLoading) {
+        generateBtn.disabled = isLoading;
+        spinner.classList.toggle('hidden', !isLoading);
+        placeholder.classList.toggle('hidden', isLoading || imageGrid.children.length > 0);
+        if (isLoading) {
+            imageGrid.innerHTML = '';
+            hideError();
+        }
+    }
+
+    function showError(message) {
+        errorMessage.textContent = message;
+        errorMessage.classList.remove('hidden');
+        imageGrid.innerHTML = '';
+        placeholder.classList.add('hidden');
+    }
+
+    function hideError() {
+        errorMessage.classList.add('hidden');
+    }
+
+    // --- Event Listeners ---
+    
+    widthSlider.addEventListener('input', () => widthValue.textContent = `${widthSlider.value}px`);
+    heightSlider.addEventListener('input', () => heightValue.textContent = `${heightSlider.value}px`);
+    stepsSlider.addEventListener('input', () => stepsValue.textContent = stepsSlider.value);
+    countSlider.addEventListener('input', () => countValue.textContent = countSlider.value);
+
+    generateBtn.addEventListener('click', handleGenerate);
+    modelSelect.addEventListener('change', handleModelChange);
+    // When the user finishes editing the API key, try to populate models.
+    apiKeyInput.addEventListener('change', populateModels);
+
+    // --- Initial Load ---
+    // Attempt to load models as soon as the page is ready.
+    populateModels();
+});
+
+
+--- 文件路径: static\style.css ---
+
+:root {
+    --bg-color: #f0f2f5;
+    --sidebar-bg: #ffffff;
+    --main-bg: #f7f7f8;
+    --border-color: #e5e7eb;
+    --text-color: #111827;
+    --text-secondary: #6b7280;
+    --primary-color: #4f46e5;
+    --primary-hover: #4338ca;
+    --input-bg: #f9fafb;
+    --warning-text: #c2410c;
+}
+
+* { box-sizing: border-box; }
+
+body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    margin: 0;
+    background-color: var(--bg-color);
+    color: var(--text-color);
+    font-size: 14px;
+    display: flex;
+    height: 100vh;
+    overflow: hidden;
+}
+
+.container {
+    display: flex;
+    width: 100%;
+    height: 100%;
+}
+
+.sidebar {
+    width: 350px;
+    flex-shrink: 0;
+    background-color: var(--sidebar-bg);
+    border-right: 1px solid var(--border-color);
+    padding: 24px;
+    display: flex;
+    flex-direction: column;
+    overflow-y: auto;
+}
+
+.header {
+    padding-bottom: 16px;
+    margin-bottom: 24px;
+    border-bottom: 1px solid var(--border-color);
+}
+.header h2 { margin: 0; }
+.header p { margin: 4px 0 0; color: var(--text-secondary); }
+
+.main-content {
+    flex-grow: 1;
+    background-color: var(--main-bg);
+    padding: 24px;
+    overflow-y: auto;
+}
+
+#result-panel {
+    width: 100%;
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+}
+
+.form-group { margin-bottom: 20px; }
+label { display: block; font-weight: 500; margin-bottom: 8px; }
+
+input[type="password"], textarea, select {
+    width: 100%;
+    padding: 12px 14px;
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    font-size: 16px;
+    background-color: var(--input-bg);
+    transition: border-color 0.2s;
+}
+textarea { resize: vertical; }
+input:focus, textarea:focus, select:focus {
+    outline: none;
+    border-color: var(--primary-color);
+    box-shadow: 0 0 0 2px rgba(79, 70, 229, 0.2);
+}
+
+.slider-group .slider-label {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+.slider-group .slider-label span {
+    font-weight: 600;
+    color: var(--primary-color);
+}
+.slider-group small, .model-warning {
+    display: block;
+    margin-top: 6px;
+    font-size: 12px;
+}
+.slider-group small {
+    color: var(--text-secondary);
+}
+.model-warning {
+    color: var(--warning-text);
+}
+
+input[type="range"] {
+    -webkit-appearance: none;
+    width: 100%;
+    height: 6px;
+    background: #ddd;
+    border-radius: 5px;
+    outline: none;
+    margin-top: 8px;
+}
+input[type="range"]::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 18px;
+    height: 18px;
+    background: var(--primary-color);
+    cursor: pointer;
+    border-radius: 50%;
+}
+input[type="range"]::-moz-range-thumb {
+    width: 18px;
+    height: 18px;
+    background: var(--primary-color);
+    cursor: pointer;
+    border-radius: 50%;
+}
+
+#generate-btn {
+    width: 100%;
+    padding: 12px;
+    background-color: var(--primary-color);
+    color: white;
+    border: none;
+    border-radius: 6px;
+    font-size: 16px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: background-color 0.2s;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    margin-top: auto;
+}
+#generate-btn:hover { background-color: var(--primary-hover); }
+#generate-btn:disabled { background-color: #9ca3af; cursor: not-allowed; }
+
+.placeholder {
+    text-align: center;
+    color: var(--text-secondary);
+}
+
+#image-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(256px, 1fr));
+    gap: 16px;
+    width: 100%;
+}
+.image-container {
+    position: relative;
+    overflow: hidden;
+    border-radius: 8px;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+}
+.image-container img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    display: block;
+}
+
+.hidden { display: none; }
+
+.spinner {
+    border: 5px solid rgba(0, 0, 0, 0.1);
+    width: 50px;
+    height: 50px;
+    border-radius: 50%;
+    border-left-color: var(--primary-color);
+    animation: spin 1s ease infinite;
+}
+@keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+
+.error {
+    color: #b91c1c;
+    background-color: #fee2e2;
+    border: 1px solid #fca5a5;
+    padding: 15px;
+    border-radius: 6px;
+    text-align: center;
+    max-width: 600px;
+}
+
+
+
